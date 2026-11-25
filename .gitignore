@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+credentials.json
+client_secret*.json
+token.json
+
+# Application data
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.sqlite3
+data/*.sqlite3-wal
+data/*.sqlite3-shm
+data/tokens/
+data/token.json
+logs/
+*.log
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Sensitive configuration
+.env
+.env.*
+!.env.example
+credentials.json
+
+# Private application data
+data/
+logs/
+
+# Python environment and cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Database and logs
+*.db
+*.sqlite*
+*.log
+
+# Private keys
+*.pem
+*.key
