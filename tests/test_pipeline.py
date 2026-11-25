@@ -23,7 +23,11 @@ from email_guardian.gmail_client import (
 from email_guardian.logging_setup import setup_logging, shutdown_logging
 from email_guardian.notifier import TelegramDelivery, TelegramNotifier
 from email_guardian.storage import EmailStore, NotificationStatus
-from email_guardian.summarizer import Classification, OllamaError
+from email_guardian.summarizer import (
+    Classification,
+    OllamaError,
+    OllamaUnavailableError,
+)
 
 FAKE_TOKEN = "333333:PIPELINE_FAKE_TOKEN_DO_NOT_PRINT_987654321"
 CHAT_ID = "777001"
@@ -78,10 +82,12 @@ class FakeAnalyzer:
         results: dict[str, Classification],
         *,
         fail_ids: tuple[str, ...] = (),
+        unavailable_ids: tuple[str, ...] = (),
         unavailable: bool = False,
     ) -> None:
         self.results = results
         self.fail_ids = set(fail_ids)
+        self.unavailable_ids = set(unavailable_ids)
         self.unavailable = unavailable
         self.analyzed: list[tuple[str, str, str]] = []
 
@@ -91,6 +97,8 @@ class FakeAnalyzer:
 
     def analyze(self, email: EmailMessage, body: str) -> Classification:
         self.analyzed.append((email.account, email.message_id, body))
+        if email.message_id in self.unavailable_ids:
+            raise OllamaUnavailableError("Ollama unavailable")
         if email.message_id in self.fail_ids:
             raise OllamaError("analysis failed")
         return self.results[email.message_id]
@@ -433,6 +441,38 @@ class FailureHandlingTest(PipelineTestCase):
         self.assertIsNone(
             self.store.get_notification_status("personal", "bad-body")
         )
+
+    def test_ollama_outage_defers_remaining_messages_and_other_account(self) -> None:
+        messages = {
+            "personal": [
+                make_email("personal", "m1", "First"),
+                make_email("personal", "m2", "Second"),
+                make_email("personal", "m3", "Third"),
+            ],
+            "work": [
+                make_email("work", "w1", "Fourth"),
+                make_email("work", "w2", "Fifth"),
+            ],
+        }
+        results = {
+            message_id: make_classification("IMPORTANT", 8)
+            for message_id in ("m2", "m3", "w1", "w2")
+        }
+        analyzer = FakeAnalyzer(results, unavailable_ids=("m1",))
+        notifier = FakeNotifier()
+
+        report = self.agent(
+            factory=self.client_factory(messages),
+            analyzer=analyzer,
+            notifier=notifier,
+        ).run_once()
+
+        self.assertEqual(report.failed, 5)
+        self.assertEqual(report.stored, 0)
+        self.assertEqual(len(analyzer.analyzed), 1)
+        self.assertEqual(notifier.sent, [])
+        self.assertIsNone(self.store.get_sync_checkpoint("personal"))
+        self.assertIsNone(self.store.get_sync_checkpoint("work"))
 
     def test_failed_account_keeps_its_existing_checkpoint(self) -> None:
         self.store.set_sync_checkpoint(

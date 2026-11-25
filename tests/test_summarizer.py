@@ -18,8 +18,11 @@ from email_guardian.summarizer import (
     CATEGORIES,
     JOB_DEFAULT_ACTION,
     JOB_IMPORTANT_REASON,
+    MAX_INFERENCE_TIMEOUT_SECONDS,
+    MAX_OUTPUT_TOKENS,
     MAX_PROMPT_BODY_CHARS,
     RESPONSE_SCHEMA,
+    TRIM_MARKER,
     SYSTEM_PROMPT,
     OllamaAnalyzer,
     OllamaError,
@@ -295,14 +298,55 @@ class AnalyzeTest(AnalyzerTestCase):
         )
         self.assertEqual(post.call_count, 1)
 
-    def test_long_bodies_are_truncated_in_the_prompt(self) -> None:
+    def test_long_bodies_are_bounded_and_marked_as_trimmed(self) -> None:
         body = "A" * (MAX_PROMPT_BODY_CHARS + 500)
         _, post = self.analyze_with(classification_json(), body=body)
 
         user = post.call_args.kwargs["json"]["messages"][1]["content"]
-        self.assertIn("[body truncated for analysis]", user)
-        self.assertIn("A" * MAX_PROMPT_BODY_CHARS, user)
-        self.assertNotIn("A" * (MAX_PROMPT_BODY_CHARS + 1), user)
+        prompt_body = user.split("Body:\n", 1)[1].split("<<<END-EMAIL-", 1)[0]
+        self.assertIn(TRIM_MARKER, prompt_body)
+        self.assertIn("[middle omitted]", prompt_body)
+        self.assertIn("A" * int(MAX_PROMPT_BODY_CHARS * 0.6), prompt_body)
+        self.assertLess(len(prompt_body), MAX_PROMPT_BODY_CHARS + 100)
+
+    def test_signal_lines_from_the_middle_survive_trimming(self) -> None:
+        body = (
+            "A" * 1500
+            + "\nApply by 2026-12-01. Confirm the interview slot.\n"
+            + "B" * 1500
+        )
+        _, post = self.analyze_with(classification_json(), body=body)
+
+        user = post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertIn("Apply by 2026-12-01.", user)
+        self.assertIn("Confirm the interview slot.", user)
+
+    def test_output_tokens_and_read_timeout_are_bounded(self) -> None:
+        _, post = self.analyze_with(classification_json())
+        options = post.call_args.kwargs["json"]["options"]
+
+        self.assertEqual(options["num_predict"], MAX_OUTPUT_TOKENS)
+        self.assertLessEqual(options["num_predict"], 200)
+        self.assertLessEqual(
+            post.call_args.kwargs["timeout"][1], MAX_INFERENCE_TIMEOUT_SECONDS
+        )
+
+        slow = OllamaAnalyzer(
+            make_settings(Path(self._tmp.name), OLLAMA_TIMEOUT_SECONDS="600")
+        )
+        self.assertEqual(slow._timeout_seconds, MAX_INFERENCE_TIMEOUT_SECONDS)
+
+    def test_system_prompt_is_compact_but_keeps_all_rules(self) -> None:
+        self.assertLess(len(SYSTEM_PROMPT), 2000)
+        for phrase in (
+            "UNTRUSTED DATA",
+            "SPAM",
+            "recruitment",
+            "notification threshold",
+            "use null",
+            "cannot visit links",
+        ):
+            self.assertIn(phrase, SYSTEM_PROMPT)
 
     def test_empty_body_falls_back_to_the_snippet(self) -> None:
         email = make_email(snippet="UNIQUE PREVIEW TEXT")
@@ -618,6 +662,20 @@ class TransportTest(AnalyzerTestCase):
         formats = [call.kwargs["json"]["format"] for call in post.call_args_list]
         self.assertEqual(formats, [RESPONSE_SCHEMA, "json", "json"])
         self.assertEqual(second.category, "NORMAL")
+
+    def test_timeout_shaped_http_500_is_not_retried(self) -> None:
+        response = FakeResponse(
+            status_code=500, payload={"error": "context deadline exceeded"}
+        )
+        with patch(
+            "email_guardian.summarizer.requests.post", return_value=response
+        ) as post, patch("email_guardian.summarizer.time.sleep"):
+            with self.assertRaises(OllamaError) as ctx:
+                self.analyzer.analyze(make_email(), "Hello")
+
+        self.assertEqual(post.call_count, 1)
+        self.assertIn("HTTP 500", str(ctx.exception))
+        self.assertIn("deadline exceeded", str(ctx.exception))
 
     def test_unrelated_400_is_not_retried(self) -> None:
         response = FakeResponse(
@@ -1062,6 +1120,21 @@ class ClassificationScenarioTest(AnalyzerTestCase):
 
         self.assertEqual(result.category, "IMPORTANT")
         self.assertEqual(result.score, 7)
+
+    def test_all_five_categories_are_preserved(self) -> None:
+        for category in CATEGORIES:
+            with self.subTest(category=category):
+                result, _ = self.analyze_with(
+                    classification_json(
+                        category=category,
+                        importance_score=5,
+                        required_action=None,
+                        deadline=None,
+                    ),
+                    body="Routine note with no action required.",
+                    email=make_email(subject="Status update"),
+                )
+                self.assertEqual(result.category, category)
 
     def test_promotion_is_promotional_without_invented_action(self) -> None:
         result, _ = self.analyze_with(
