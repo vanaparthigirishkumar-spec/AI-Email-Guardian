@@ -989,5 +989,19 @@ def _looks_like_schema_error(detail: str) -> bool:
     return any(token in lowered for token in ("format", "schema", "grammar"))
 
 
+def _looks_like_timeout(detail: str) -> bool:
+    lowered = detail.lower()
+    return any(
+        token in lowered
+        for token in (
+            "timeout",
+            "timed out",
+            "deadline exceeded",
+            "context deadline",
+            "context canceled",
+        )
+    )
+
+
 def _model_matches(available: str, wanted: str) -> bool:
     return available == wanted or available.split(":")[0] == wanted.split(":")[0]

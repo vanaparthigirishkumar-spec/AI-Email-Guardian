@@ -358,7 +358,7 @@ def run_ai(settings: Settings, args: argparse.Namespace) -> int:
         _warn(
             "Ollama timeout",
             f"{settings.ollama_timeout_seconds}s - the first request may need longer "
-            "while the model loads; consider OLLAMA_TIMEOUT_SECONDS=300",
+            "while the model loads; consider OLLAMA_TIMEOUT_SECONDS=180",
         )
 
     client = GmailClient(settings, account)

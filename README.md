@@ -66,6 +66,8 @@ flowchart LR
 
 Gmail remains read-only throughout: the API is used only for profile checks, message metadata and message bodies.
 
+**CPU inference budget.** On small CPU-only hosts, prompt length dominates latency. The analyzer therefore uses a compact system prompt (about 1.7k characters), caps email text at 2,000 characters with the opening, signal lines (e.g. deadlines and application instructions) and the ending preserved, and caps generation at 180 output tokens. Inference read timeouts are not retried immediately; timeout-shaped HTTP 500 responses are not retried either. If Ollama becomes unavailable mid-cycle, the remaining messages are deferred to the next poll instead of waiting on repeated timeouts.
+
 ---
 
 ## Local installation
@@ -112,7 +114,7 @@ ollama pull llama3.2          # matches the code default OLLAMA_MODEL=llama3.2
 ollama pull llama3.2:3b       # used by the current deployment
 ```
 
-Either tag works with the application; set `OLLAMA_MODEL` in `.env` to the tag you pulled. The first request may take longer while the model loads, so `OLLAMA_TIMEOUT_SECONDS` defaults to `300`.
+Either tag works with the application; set `OLLAMA_MODEL` in `.env` to the tag you pulled. The first request may take longer while the model loads, so `OLLAMA_TIMEOUT_SECONDS` defaults to `180`, which is also the effective read-timeout cap. Inference timeouts are not retried immediately.
 
 ### 3. Environment file
 
@@ -247,7 +249,7 @@ All settings live in `.env`; `.env.example` is the documented template.
 | `POLL_INTERVAL_SECONDS` | `60` | Poll interval (minimum 10) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
 | `OLLAMA_MODEL` | `llama3.2` | Model used for analysis |
-| `OLLAMA_TIMEOUT_SECONDS` | `300` | Per-request timeout |
+| `OLLAMA_TIMEOUT_SECONDS` | `180` | Per-request read timeout (capped at 180 s) |
 | `TELEGRAM_BOT_TOKEN` | empty | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | empty | Destination chat id |
 | `DATABASE_PATH` | `data/emails.db` | SQLite file |

@@ -22,7 +22,12 @@ from email_guardian.storage import (
     StorageError,
     StoredEmail,
 )
-from email_guardian.summarizer import Classification, OllamaAnalyzer, OllamaError
+from email_guardian.summarizer import (
+    Classification,
+    OllamaAnalyzer,
+    OllamaError,
+    OllamaUnavailableError,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -79,11 +84,13 @@ class EmailGuardianAgent:
         self._notifier = notifier if notifier is not None else TelegramNotifier(settings)
         self._client_factory = client_factory or GmailClient
         self._account_emails: dict[str, str] = {}
+        self._ollama_unavailable = False
 
     def run_once(self, *, dry_run: bool = False) -> CycleReport:
         """Process every configured account once, then return the report."""
 
         report = CycleReport()
+        self._ollama_unavailable = False
         self._store.initialize()
         try:
             self._recover_pending(report, dry_run=dry_run)
@@ -261,9 +268,20 @@ class EmailGuardianAgent:
 
         report.accounts_processed += 1
         report.fetched += len(messages)
-        failures = 0
+        if self._ollama_unavailable:
+            report.failed += len(messages)
+            LOGGER.warning(
+                "Ollama is unavailable; skipped %d message(s) for account %s "
+                "without further inference attempts",
+                len(messages),
+                account,
+            )
+            return
 
+        failures = 0
+        remaining = len(messages)
         for message in messages:
+            remaining -= 1
             try:
                 if self._store.is_processed(message.message_id, account):
                     report.duplicates += 1
@@ -298,6 +316,19 @@ class EmailGuardianAgent:
                     report.notifications_sent += 1
                 else:
                     report.notifications_failed += 1
+            except OllamaUnavailableError as exc:
+                skipped = 1 + remaining
+                failures += skipped
+                report.failed += skipped
+                self._ollama_unavailable = True
+                LOGGER.error(
+                    "Ollama became unavailable for account %s (%s); "
+                    "%d message(s) deferred to the next cycle",
+                    account,
+                    exc,
+                    skipped,
+                )
+                break
             except (GmailError, OllamaError, StorageError) as exc:
                 failures += 1
                 report.failed += 1
