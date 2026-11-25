@@ -1,46 +1,90 @@
 # AI Email Guardian
 
-A free, local-first AI agent that watches your Gmail inbox, decides which emails
-matter, summarizes them with a local LLM, and pings you on Telegram.
+**Repository:** <https://github.com/vanaparthigirishkumar-spec/AI-Email-Guardian>
 
-No paid APIs. No cloud AI. Only the read-only Gmail scope is requested: the app
-never sends, deletes, modifies or marks messages as read.
+AI Email Guardian is an AI-powered email monitoring and notification system built with **Python, the Gmail API, Ollama, SQLite and Telegram**. It watches two Gmail accounts, decides which messages matter, summarizes them with a locally running language model, keeps a durable history, and sends actionable alerts to Telegram.
 
-## Status
+The design is local-first and privacy-conscious: Gmail access is **read-only**, email content is processed by Ollama on the same machine, and only metadata plus AI output are written to SQLite. No paid AI API is used.
 
-| Phase | Scope | State |
-|-------|-------|-------|
-| 1 | Project skeleton, configuration, logging, setup checks | Done |
-| 2 | Gmail OAuth 2.0 (multi-account), profiles, inbox metadata | Done |
-| 3 | Ollama importance scoring and summaries | Done |
-| 4 | SQLite history and duplicate protection | Planned |
-| 5 | Telegram alerts and the 60-second polling loop | Planned |
+---
 
-## Stack
+## Project overview
 
-- **Python 3.10+** application code
-- **Gmail API** with OAuth 2.0 Desktop Application flow (free)
-- **Ollama** for local inference (free, offline)
-- **SQLite** for local history
-- **Telegram Bot API** for notifications (free)
+- **Version:** 0.1.0
+- **Local runtime:** Python 3.10+ (developed on Windows 11 / Python 3.14; deployment uses Python 3.12 on Ubuntu 24.04 LTS)
+- **Accounts:** two Gmail aliases, `personal` and `work` by default
+- **Retrieval:** Gmail API metadata + MIME text bodies, never attachments
+- **AI:** local Ollama model (`llama3.2` by default; `llama3.2:3b` in the current deployment)
+- **Storage:** versioned SQLite schema (v3) with WAL and duplicate protection
+- **Delivery:** Telegram Bot API with confirmed sends and a retryable pending queue
+- **Automation:** one-shot cycle or a continuous 60-second watch loop
 
-## Requirements
+---
 
-- Windows 11, PowerShell
-- Python 3.10 or newer (`py --version`)
+## Key features
+
+- **Two-account monitoring** — `GMAIL_ACCOUNTS` defines the only accounts processed; each alias has its own OAuth token and sync checkpoint. Personal and Work are kept strictly separate in storage, notifications and Gmail links.
+- **Read-only Gmail access** — the app requests only `https://www.googleapis.com/auth/gmail.readonly`. It never sends, deletes, modifies or marks messages as read, and rejects tokens with broader scopes.
+- **Local AI classification** — Ollama produces structured JSON with a category, score, summary, reason, suggested action and optional deadline. Malformed output gets one controlled correction attempt; nothing is invented.
+- **Five categories** — `URGENT`, `IMPORTANT`, `NORMAL`, `PROMOTIONAL` and `SPAM`.
+- **Job-related email detection** — genuine vacancies, job alerts, recruiter messages, interview invitations, application updates and offers are raised to `IMPORTANT` with a score at or above `IMPORTANCE_THRESHOLD`, even if the model would otherwise call them promotional.
+- **Importance scoring and summaries** — a 0–10 score plus a short factual summary drives notification decisions and the alert text.
+- **SQLite history and duplicate prevention** — processed emails, classifications, delivery status and per-account checkpoints persist across restarts. A unique `(account_alias, gmail_message_id)` constraint makes reprocessing a no-op.
+- **Telegram notifications** — only `URGENT` mail and `IMPORTANT` mail scoring at or above the threshold is delivered. `NORMAL`, `PROMOTIONAL` and `SPAM` are never notified.
+- **Delivery confirmation and recovery** — status becomes `SENT` only after Telegram returns a confirmed message id; pending alerts are retried at the start of the next cycle. Individual false positives can be suppressed or restored without deleting data.
+- **Continuous monitoring** — `process watch` repeats the full cycle every 60 seconds (`POLL_INTERVAL_SECONDS`, minimum 10) until Ctrl+C.
+- **Resilient operation** — per-account and per-message failures are logged and isolated; temporary Gmail, Ollama or Telegram errors are retried on the next cycle instead of stopping the monitor.
+- **Privacy-safe logging** — bodies, snippets, prompts, OAuth tokens and bot tokens are never logged or written to the database.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    CLI["main.py / CLI"] --> Agent["EmailGuardianAgent<br/>(one-shot or watch loop)"]
+    Agent --> Gmail["GmailClient<br/>OAuth 2.0 · gmail.readonly"]
+    Gmail -->|metadata + text body| Analyzer["OllamaAnalyzer"]
+    Analyzer --> Ollama[("Ollama<br/>llama3.2:3b<br/>local inference")]
+    Analyzer --> Store[("SQLite<br/>WAL · migrations<br/>processed / classified / delivery / checkpoints")]
+    Agent --> Store
+    Store -->|pending queue| Notifier["TelegramNotifier"]
+    Agent --> Notifier
+    Notifier --> Telegram["Telegram Bot API"]
+    Telegram --> Phone["Android Telegram app"]
+```
+
+**How a cycle works**
+
+1. The CLI loads validated settings from `.env` and creates `EmailGuardianAgent`.
+2. The agent retries any `PENDING` notifications left by an earlier run, then verifies that Ollama and the configured model are available.
+3. For each configured account, `GmailClient` loads its own token, reads recent inbox metadata, skips ids already in SQLite, and fetches only the text body of new messages. Attachments are never downloaded.
+4. `OllamaAnalyzer` sends untrusted email text to the local Ollama endpoint inside random delimiters, validates the returned JSON, applies the job-related rule, and returns a classification.
+5. `EmailStore` records metadata and analysis in one transaction, sets the notification status to `PENDING` when the email qualifies, and preserves the account checkpoint.
+6. `TelegramNotifier` sends qualifying alerts. Status moves to `SENT` only after Telegram confirms the message id; otherwise it becomes `FAILED`. Suppressed notifications move to the terminal `NOT_REQUIRED` state.
+7. `process watch` repeats steps 2–6 every 60 seconds until Ctrl+C.
+
+Gmail remains read-only throughout: the API is used only for profile checks, message metadata and message bodies.
+
+---
+
+## Local installation
+
+### 1. Prerequisites
+
+- Python 3.10 or newer (`py --version` on Windows, `python3 --version` on Linux)
 - [Ollama](https://ollama.com/download) installed and running
 - A Google Cloud project with the Gmail API enabled
 - A Telegram bot created with [@BotFather](https://t.me/BotFather)
 
-## Setup
+**Windows (PowerShell):**
 
 ```powershell
-py -m venv .venv
+cd C:\Users\user\AI-Email-Guardian
+py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-
-Copy-Item .env.example .env   # only if .env does not exist yet
 ```
 
 If PowerShell blocks activation:
@@ -49,323 +93,320 @@ If PowerShell blocks activation:
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
-## Google Cloud setup (Gmail API)
+**Linux:**
 
-Do this once; the same OAuth client serves every account.
+```bash
+cd /path/to/AI-Email-Guardian
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 2. Ollama
+
+Start Ollama (desktop app or `ollama serve`) and pull a model once:
+
+```bash
+ollama pull llama3.2          # matches the code default OLLAMA_MODEL=llama3.2
+ollama pull llama3.2:3b       # used by the current deployment
+```
+
+Either tag works with the application; set `OLLAMA_MODEL` in `.env` to the tag you pulled. The first request may take longer while the model loads, so `OLLAMA_TIMEOUT_SECONDS` defaults to `300`.
+
+### 3. Environment file
+
+```powershell
+Copy-Item .env.example .env   # only if .env does not exist yet
+```
+
+```bash
+cp .env.example .env
+```
+
+Set at minimum:
+
+```dotenv
+GMAIL_ACCOUNTS=personal,work
+OLLAMA_MODEL=llama3.2:3b
+TELEGRAM_BOT_TOKEN=<token from @BotFather>
+TELEGRAM_CHAT_ID=<numeric chat id>
+IMPORTANCE_THRESHOLD=7
+POLL_INTERVAL_SECONDS=60
+```
+
+`.env` is ignored by Git. Never commit it or paste its contents into issues.
+
+### 4. Gmail OAuth setup
+
+Do this once; the same Desktop OAuth client serves both accounts.
 
 1. Open <https://console.cloud.google.com/> and create or select a project.
-2. **APIs & Services → Library**, search for **Gmail API**, open it, click **Enable**.
+2. **APIs & Services → Library** → enable **Gmail API**.
 3. **APIs & Services → OAuth consent screen**:
    - User type: **External** (or **Internal** for Google Workspace).
    - Fill in app name, user support email and developer contact email.
-   - **Scopes → Add or remove scopes**: add
+   - **Scopes → Add or remove scopes**: add only
      `https://www.googleapis.com/auth/gmail.readonly`.
-     Do not add any other Gmail scope.
-   - **Test users**: add every Gmail address you will monitor while the app
-     status is **Testing**.
-4. **APIs & Services → Credentials → Create credentials → OAuth client ID**.
+   - **Test users**: add every Gmail address you will monitor while the app is in **Testing** mode.
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID**:
    - Application type: **Desktop app**.
-   - Name it (e.g. `AI Email Guardian`) and click **Create**.
-   - Click **Download JSON**.
-5. Save the downloaded file as `credentials.json` in the project root
-   (next to `main.py`). Never commit it; it is already gitignored.
-6. Authenticate each configured account separately:
+   - Download the JSON and save it as `credentials.json` in the project root.
+5. Authenticate each alias separately (a browser window opens; choose the correct Google account each time):
 
    ```powershell
    python main.py gmail auth personal
    python main.py gmail auth work
    ```
 
-   A browser window opens; sign in to the Gmail account for that alias. The
-   account chooser is always shown so you can pick a different account for the
-   second alias. Each token is written to `data/tokens/<alias>.json`.
-7. Verify:
+   Tokens are written to `data/tokens/personal.json` and `data/tokens/work.json`, with local metadata files recording the authenticated address.
+
+6. Verify the setup:
 
    ```powershell
    python main.py gmail accounts
-   python main.py gmail test personal --limit 5
    python main.py doctor --online
    ```
 
-Notes:
+### 5. Telegram configuration
 
-- While the OAuth consent screen is in **Testing**, Google expires refresh
-  tokens after 7 days. Re-run `gmail auth <alias>` weekly, or publish the app
-  (Google verification may be required for external users).
-- Tokens are per account; deleting `data/tokens/<alias>.json` only revokes the
-  local copy. Revoke access from your Google Account → Security → Third-party
-  apps at any time.
+1. Create the bot with [@BotFather](https://t.me/BotFather) and copy its token into `TELEGRAM_BOT_TOKEN`.
+2. Send any message to the bot, then discover the numeric chat id:
 
-## Usage
+   ```powershell
+   python main.py telegram chats --limit 20
+   ```
+
+3. Put that id in `TELEGRAM_CHAT_ID`.
+4. Confirm real delivery:
+
+   ```powershell
+   python main.py telegram test
+   ```
+
+   The test verifies the bot with `getMe`, sends a plain-text message and reports success only after Telegram confirms it. The bot token is never printed or logged.
+
+### 6. Run tests
 
 ```powershell
-python main.py doctor                  # offline setup report
-python main.py doctor --online         # also query Gmail profile for each account
-python main.py gmail accounts          # configured accounts and token state
-python main.py gmail auth <alias>      # OAuth desktop flow for one account
-python main.py gmail auth <alias> --force
-python main.py gmail test <alias> --limit 5
-python main.py ai test <alias> --limit 3   # fetch + analyze recent mail once
-python main.py process once            # one full cycle for all accounts, then exit
-python main.py process once --dry-run  # analyze/store, deliver no notifications
-python main.py process watch            # monitor both accounts until Ctrl+C
-python main.py notifications pending   # read-only view of the pending alert queue
-python main.py notifications suppress <account> <message-id>
-python main.py notifications unsuppress <account> <message-id>
-python main.py run                     # legacy stub; monitoring uses `process watch`
 python -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
-`gmail test` prints sender, subject and date for the newest messages and never
-downloads bodies (`format=metadata`). `ai test` fetches the body of each selected
-message (`format=full`), then asks the local Ollama model for a structured
-classification. It analyzes only a handful of messages and exits; continuous
-polling arrives in Phase 5.
+The suite uses mocked Gmail, Ollama and Telegram services and a temporary SQLite database; it sends no real notifications. At version 0.1.0 it contains **269 tests**.
 
-## AI analysis (Phase 3)
+---
 
-`python main.py ai test personal --limit 3` prints one block per message:
+## Running the application
 
+| Command | Purpose |
+|---------|---------|
+| `python main.py doctor` | Offline setup report |
+| `python main.py doctor --online` | Also verify both Gmail profiles |
+| `python main.py gmail accounts` | Token/alias status |
+| `python main.py gmail auth <alias> [--force]` | Re-authenticate one account |
+| `python main.py gmail test <alias> --limit 5` | List recent message metadata only |
+| `python main.py ai test <alias> --limit 3` | Fetch bodies and classify once |
+| `python main.py process once` | One full cycle for both accounts, then exit |
+| `python main.py process once --dry-run` | Analyze and store without delivering alerts |
+| `python main.py process watch` | Continuous monitoring until Ctrl+C |
+| `python main.py notifications pending` | Read-only pending alert queue |
+| `python main.py notifications suppress <alias> <message-id>` | Suppress one alert without sending anything |
+| `python main.py notifications unsuppress <alias> <message-id>` | Restore an eligible alert to `PENDING` |
+| `python main.py telegram test` | Verify real Telegram delivery |
+| `python main.py telegram chats --limit 20` | Discover chat ids |
+
+Start one cycle:
+
+```powershell
+python main.py process once
 ```
-  [URGENT] 9/10 (confidence 85%)  [meets threshold]
-      2026-11-24 09:12 | Alice <alice@example.com> | Server outage notice
-      Summary : Production is down and needs attention today.
-      Reason  : The sender reports an active outage and asks for a reply.
-      Action  : Check the dashboard and reply to Alice.
-      Deadline: 2026-11-24
+
+Start continuous monitoring:
+
+```powershell
+python main.py process watch
 ```
 
-Every analysis contains a category (`URGENT`, `IMPORTANT`, `NORMAL`,
-`PROMOTIONAL`, `SPAM`), an importance score (0-10), a short summary, the
-classification reason, the required action, an optional deadline and a
-confidence value. `IMPORTANCE_THRESHOLD` decides which results are flagged as
-meeting the bar; notifications use the same threshold in Phase 5.
+Press **Ctrl+C** for a clean shutdown. Nothing is sent during `--dry-run`; those notifications stay `PENDING` and are delivered by the next normal or watch cycle.
 
-Genuine job-related mail (vacancies, job alerts, recruiter messages, interview
-invitations, application updates, assessments and offers) is always raised to
-`IMPORTANT` with a score at least equal to `IMPORTANCE_THRESHOLD`, even when the
-model would otherwise call it promotional. Ordinary product advertising is not
-treated as job mail just because it comes from a recruitment site.
+---
 
-The prompt requires evidence before a `SPAM` verdict: a link alone is not proof
-of phishing, and the analyzer never claims a link was opened or a website
-verified. When the message lacks enough evidence, the result says authenticity
-cannot be determined and suggests visiting the official site directly.
+## Configuration reference
 
-The model runs entirely on this machine through Ollama. Requests ask Ollama for
-schema-constrained JSON (falling back to plain JSON mode on older versions).
-The response must be a single JSON object; malformed or incomplete output gets
-one controlled correction attempt, then a clear error instead of being
-trusted. Missing `required_action` or `deadline` values become `None`; nothing
-is invented. Read timeouts are not retried (that would duplicate inference),
-and each request's duration is logged. Missing Ollama/model errors include the
-exact command to run.
-
-Bodies are extracted from MIME messages: `text/plain` is preferred, HTML is
-converted to text as a fallback, and attachment parts are skipped and never
-downloaded. Very large bodies are truncated for analysis only.
-
-## SQLite persistence (Phase 4)
-
-`data/emails.db` is created on first use and checked by `python main.py doctor`.
-The doctor closes its database connection after checking it, and its final line
-shows the current status of each configured Gmail account. Missing Telegram
-credentials are reported as expected until Phase 5 and never as database errors.
-The schema is versioned with `PRAGMA user_version` plus a `schema_migrations`
-table, so existing data is upgraded in order on restart. Connections use WAL
-mode, a 5-second busy timeout, foreign keys and explicit transactions; cleanup
-checkpoints WAL and closes handles, which matters on Windows.
-
-Tables cover accounts, processed emails, AI classifications, notification
-delivery, account-level sync checkpoints and applied migrations. A unique
-constraint on `(account_alias, gmail_message_id)` prevents the same Gmail
-message being stored twice for one account; the same message may exist under
-different aliases. Duplicate inserts are no-ops and never overwrite the first
-classification.
-
-Notification status starts as `NOT_REQUIRED` or `PENDING`, then moves through
-`FAILED` and/or `SENT`. `SENT` is only written by an explicit confirmation call
-after a provider accepts delivery; restarts and repeated calls cannot create a
-second alert. Delivery attempts and timestamps are retained. Telegram delivery
-is used by `python main.py process once` and is confirmed by the Bot API reply.
-
-Only metadata and analysis output are stored. Bodies, attachments, snippets,
-OAuth tokens and Google credentials are never written to SQLite. The database,
-`-wal` and `-shm` files are gitignored. **SQLite files are not encrypted by
-default**; protect the `data/` directory with operating-system permissions and
-encrypt any backups that leave this machine.
-
-## End-to-end processing
-
-`python main.py process once` runs one cycle for every configured account and
-exits: fetch message metadata, skip already processed ids, fetch each new body,
-classify it with Ollama, store metadata and analysis in SQLite, then deliver
-notifications. Only `URGENT` mail and `IMPORTANT` mail scoring at or above
-`IMPORTANCE_THRESHOLD` is notified; every genuine job-related email is raised to
-`IMPORTANT` by the analyzer. Notification status is written as `PENDING` before
-delivery and becomes `SENT` only when Telegram returns a confirmed message id,
-or `FAILED` when delivery is rejected. Pending alerts are retried at the start
-of the next cycle. Per-account sync checkpoints are preserved, and bodies,
-snippets, credentials and tokens are never written to SQLite or logs.
-
-`--dry-run` performs the fetch, analysis and storage but delivers nothing; the
-notifications remain `PENDING` and are sent by the next normal cycle. Continuous
-polling is not started by this command.
-
-`python main.py notifications pending` is a read-only inspection of that queue:
-it prints the total plus each pending alert's account alias, sender, subject,
-AI classification, score, email date and required action. It sends nothing and
-does not change statuses, checkpoints or records. Bodies, snippets, tokens and
-Telegram credentials are never displayed.
-
-`python main.py notifications suppress <account> <message-id>` moves one queued
-alert into the existing terminal `NOT_REQUIRED` status. It changes only the
-notification status row: the email, its classification and the account
-checkpoint are untouched, no Telegram message is sent, and the alert is never
-retried. The change persists across restarts and is repeatable (no duplicate
-rows). `python main.py notifications unsuppress <account> <message-id>` restores
-an eligible alert (`URGENT`, or `IMPORTANT` at or above the threshold) to
-`PENDING` so the next normal cycle can deliver it. Suppression is never applied
-automatically; an already delivered alert cannot be suppressed.
-
-## Telegram delivery
-
-`python main.py telegram test` verifies the bot with `getMe`, reads
-`TELEGRAM_CHAT_ID`, sends a plain-text test notification with `sendMessage` and
-reports success only after Telegram returns the message id and confirms the chat.
-A missing chat id stops the command with a clear error.
-
-`python main.py telegram chats --limit 20` uses `getUpdates` to list recent chat
-ids and titles, so `TELEGRAM_CHAT_ID` can be copied from the output. Only the
-chat id and its display name are printed; the bot token is never printed,
-logged or stored in SQLite. Request and API errors replace any token text with
-`<redacted>` before they are shown or logged.
-
-Alerts are sent as plain text with metadata and analysis output only; email
-bodies and attachments are never included. Delivery is reported as successful
-only when the Bot API confirms the send. Each alert shows the receiving account
-(`Personal` or `Work`) and carries an inline "Open in Gmail" button. The link
-uses `/u/0/?authuser=<account address>` to select the correct signed-in Gmail
-account and searches `rfc822msgid:<Message-ID>` (angle brackets removed) so it
-opens the exact email. If no Message-ID is available, the button is omitted.
-The address in `authuser` always comes from the authenticated Gmail account that
-owns the alias — never from the sender, subject, AI output, a configured guess
-or a stored queue value — so a Personal alert cannot link into the Work mailbox
-(or vice versa), including when a pending alert is retried after a restart.
-
-## Continuous monitoring
-
-`python main.py process watch` runs the same cycle every 60 seconds
-(`POLL_INTERVAL_SECONDS`) for both configured accounts until Ctrl+C. It reuses
-the one-shot pipeline: new mail is analyzed and notified, duplicates are
-skipped, pending alerts from earlier runs are retried, and a failure in one
-account (or a temporary Gmail/Ollama/Telegram error) is logged and retried on
-the next cycle instead of stopping the monitor. Gmail stays read-only; no
-messages are marked read, deleted or modified. Stop cleanly with Ctrl+C.
-
-Continuous monitoring is local only — no cloud hosting is implemented.
-
-## Configuration
-
-All settings live in `.env`, which is ignored by git. `.env.example` documents
-every key with safe defaults.
+All settings live in `.env`; `.env.example` is the documented template.
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `GMAIL_ACCOUNTS` | empty | Comma-separated aliases of the **only** accounts monitored |
-| `GMAIL_CREDENTIALS_FILE` | `credentials.json` | OAuth client file shared by all accounts |
-| `GMAIL_TOKEN_DIR` | `data/tokens` | Per-account token files (gitignored) |
-| `GMAIL_QUERY` | `in:inbox newer_than:1d` | Default Gmail search; read state is ignored |
-| `GMAIL_QUERY_<ALIAS>` | empty | Optional per-account query override |
-| `GMAIL_ACCOUNT_<ALIAS>_EMAIL` | empty | Optional expected address; mismatches abort |
-| `GMAIL_FETCH_LIMIT` | `20` | Max messages per poll (1-500) |
-| `POLL_INTERVAL_SECONDS` | `60` | Seconds between polls (minimum 10) |
+| `GMAIL_ACCOUNTS` | empty | Comma-separated aliases, e.g. `personal,work` |
+| `GMAIL_CREDENTIALS_FILE` | `credentials.json` | Shared OAuth Desktop client file |
+| `GMAIL_TOKEN_DIR` | `data/tokens` | Per-account token and metadata files |
+| `GMAIL_QUERY` | `in:inbox newer_than:1d` | Default search; read state is deliberately ignored |
+| `GMAIL_QUERY_<ALIAS>` | empty | Per-account query override |
+| `GMAIL_ACCOUNT_<ALIAS>_EMAIL` | empty | Optional expected address; a mismatch aborts |
+| `GMAIL_FETCH_LIMIT` | `20` | Messages fetched per poll (1–500) |
+| `POLL_INTERVAL_SECONDS` | `60` | Poll interval (minimum 10) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
 | `OLLAMA_MODEL` | `llama3.2` | Model used for analysis |
-| `OLLAMA_TIMEOUT_SECONDS` | `300` | Per-request timeout; the first call may load the model |
+| `OLLAMA_TIMEOUT_SECONDS` | `300` | Per-request timeout |
 | `TELEGRAM_BOT_TOKEN` | empty | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | empty | Your chat id |
-| `DATABASE_PATH` | `data/emails.db` | SQLite file location |
-| `LOG_DIR` | `logs` | Log directory |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `IMPORTANCE_THRESHOLD` | `7` | Minimum score (0-10) that triggers an alert |
+| `TELEGRAM_CHAT_ID` | empty | Destination chat id |
+| `DATABASE_PATH` | `data/emails.db` | SQLite file |
+| `LOG_DIR` | `logs` | Rotating log directory |
+| `LOG_LEVEL` | `INFO` | Logging level |
+| `IMPORTANCE_THRESHOLD` | `7` | Score needed for an `IMPORTANT` alert (`URGENT` always alerts) |
 
-`<ALIAS>` is the uppercase alias with `-` replaced by `_`, for example
-`GMAIL_QUERY_WORK_MAIN` for the alias `work-main`. Relative paths are resolved
-against the project root.
+`<ALIAS>` is uppercased with `-` replaced by `_`. Relative paths resolve against the project root.
 
-The default query intentionally avoids `is:unread`: a message you open before
-the next poll is still fetched, because selection is based on arrival time.
+---
+
+## Deployment on Google Cloud
+
+The current deployment runs on **Google Cloud Compute Engine**: Ubuntu 24.04 LTS, Python 3.12, **2 vCPU / 8 GB RAM**, Ollama with `llama3.2:3b`, SQLite, and a Linux **systemd** service running `python main.py process watch` at a 60-second interval.
+
+This repository does not ship deployment scripts; the steps below document that setup.
+
+### VM preparation
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y python3.12 python3.12-venv git
+git clone https://github.com/vanaparthigirishkumar-spec/AI-Email-Guardian.git /opt/ai-email-guardian
+cd /opt/ai-email-guardian
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Install Ollama, start it, and pull the model:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+sudo systemctl enable --now ollama
+ollama pull llama3.2:3b
+```
+
+Create `.env` with the same keys as locally, set `OLLAMA_MODEL=llama3.2:3b` and `POLL_INTERVAL_SECONDS=60`. Complete the Gmail OAuth flow where a browser is available and place only the resulting per-alias token files under `data/tokens/`; never upload tokens or `.env` to a public location.
+
+Verify before enabling the service:
+
+```bash
+cd /opt/ai-email-guardian
+.venv/bin/python main.py doctor
+.venv/bin/python main.py telegram test
+.venv/bin/python main.py process once --dry-run
+```
+
+### systemd service (example unit)
+
+Create `/etc/systemd/system/ai-email-guardian.service` (adjust user and path):
+
+```ini
+[Unit]
+Description=AI Email Guardian
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/ai-email-guardian
+ExecStart=/opt/ai-email-guardian/.venv/bin/python main.py process watch
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The application loads `.env` itself via `python-dotenv`, so no secrets need to be placed in the unit file.
+
+### Service commands
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-email-guardian   # enable and start on boot
+sudo systemctl start ai-email-guardian
+sudo systemctl stop ai-email-guardian
+sudo systemctl restart ai-email-guardian
+sudo systemctl status ai-email-guardian
+sudo systemctl status ollama
+```
+
+Logs:
+
+```bash
+journalctl -u ai-email-guardian -f              # systemd output
+tail -f /opt/ai-email-guardian/logs/email_guardian.log   # rotating application log
+```
+
+---
+
+## Security
+
+- Gmail access uses only the `gmail.readonly` scope. Tokens with broader scopes are rejected and never used; no code path sends, deletes, modifies or marks mail as read.
+- Email bodies and prompts are sent only to the locally configured Ollama endpoint. Ollama runs on the same machine in both the local and GCP setups.
+- Only notification metadata and AI output are stored in SQLite. Bodies, attachments, snippets, OAuth tokens and Google credentials are never written to the database.
+- `.env`, `credentials.json`, `data/`, `logs/` and `.venv/` are excluded from Git. The SQLite file, its `-wal`/`-shm` sidecars and per-account token files are also ignored. Never commit or publish credentials, tokens, `.env` or private email contents.
+- Logs record account aliases, message counts, message ids and classifications — not bodies, senders, subjects, snippets or secrets. Bot token text in Telegram errors is replaced with `<redacted>`; Gmail/OAuth secrets are never logged.
+- Email text is treated as untrusted data: prompts instruct the model to ignore embedded instructions, and text is wrapped in per-request random delimiters. No links are opened and no code from email is executed.
+- SQLite files are **not encrypted at rest**. Protect `data/` with operating-system permissions and encrypt any backups that leave the machine.
+- **Gmail OAuth Testing mode:** External OAuth apps in Testing mode expire refresh tokens after seven days for Gmail scopes. Periodic reauthorization with `python main.py gmail auth <alias>` may be necessary. Publishing the app is a separate Google verification process.
+
+---
+
+## Known limitations
+
+- **Gmail "Open in Gmail" button:** notifications include an inline link built from `/mail/u/0/?authuser=<authenticated account address>` and an `rfc822msgid:` search using the original RFC 822 Message-ID (angle brackets removed). It has shown "Temporary issue" redirect behaviour on a real device, so it should be treated as a best-effort convenience, **not a verified deep link**, until it is retested successfully on the target device. The notification text itself still identifies the receiving account and the email subject.
+- **Cloud hosting is not permanently free:** the GCP deployment currently runs on a trial-credit account. Cost and continuity after the trial are not guaranteed, and no serverless/always-free deployment is implemented.
+- **Testing-mode OAuth tokens expire after seven days** (see Security), so unattended long-running deployments need periodic reauthorization.
+- **No backfill:** the default Gmail query selects recent mail (`newer_than:1d`); older messages are not imported. Change `GMAIL_QUERY` per account if a wider window is needed.
+- **Delivery is best-effort:** failed sends are recorded as `FAILED`, not silently retried forever; pending sends are retried at the start of later cycles. Suppressed alerts are never retried unless explicitly restored.
+- **Single-process design:** `process watch` is one foreground process. The repository contains no built-in supervisor, web UI or mobile client beyond Telegram.
+- **Local AI quality:** classification depends on the installed Ollama model; malformed model output is corrected once and otherwise reported as an error.
+
+---
 
 ## Project layout
 
-```
+```text
 AI-Email-Guardian/
-├── main.py                     Entry point used by every command
-├── requirements.txt            Runtime dependencies
-├── .env.example                Documented template for local settings
-├── .gitignore                  Keeps secrets, data and logs out of git
-├── README.md                   This document
-├── email_guardian/             Application package
-│   ├── __init__.py             Package metadata and version
-│   ├── cli.py                  Commands: doctor, run, gmail auth/test/accounts
-│   ├── config.py               .env loading, validation, per-account paths
-│   ├── logging_setup.py        Console + rotating file logging with cleanup
-│   ├── gmail_client.py         OAuth, profile, metadata and MIME body fetch
-│   ├── summarizer.py           Ollama JSON classification, validation, prompts
-│   ├── storage.py              SQLite schema, migrations and persistence
-│   ├── notifier.py             Telegram delivery, getMe and chat discovery
-│   └── agent.py                Polling orchestration (Phase 5)
-├── tests/                      unittest suite with mocked Gmail and Ollama
-├── data/                       SQLite DB (gitignored)
-│   └── tokens/                 Per-account OAuth tokens (gitignored)
-└── logs/                       Rotating application logs (gitignored)
+├── main.py                  Entry point for all CLI commands
+├── requirements.txt         Python dependencies
+├── .env.example             Documented settings template
+├── .gitignore               Excludes secrets, data, logs and environments
+├── email_guardian/
+│   ├── cli.py               CLI commands and user-facing reports
+│   ├── config.py            Settings validation and per-account paths
+│   ├── logging_setup.py     Console and rotating file logging
+│   ├── gmail_client.py      OAuth, profile, metadata and MIME body access
+│   ├── summarizer.py        Ollama prompts, JSON validation and job rules
+│   ├── storage.py           SQLite schema v3, migrations and persistence
+│   ├── notifier.py          Telegram delivery, chat discovery and Gmail links
+│   └── agent.py             One-shot pipeline and watch loop
+├── tests/                   unittest suite with mocked external services
+├── data/                    SQLite database and per-account tokens (gitignored)
+└── logs/                    Rotating application logs (gitignored)
 ```
 
-## Security notes
-
-- Only `gmail.readonly` is requested. Tokens carrying broader Gmail scopes are
-  rejected and never used.
-- Tokens are stored under `data/tokens/`, which is gitignored; on POSIX they are
-  written with `0600` permissions.
-- `credentials.json`, `.env`, `data/tokens/` and `data/*.db` (plus `-wal`/`-shm`
-  sidecars) are all ignored.
-- Logs record account aliases, message counts and message IDs only. Subjects,
-  senders, snippets, bodies, prompts, summaries and credentials are never logged.
-- Email text is treated as untrusted data: prompts explicitly tell the model to
-  ignore instructions inside emails, and the text is wrapped in per-request
-  random delimiters. No links are opened and no code is executed.
-- Email content is sent only to the locally configured Ollama endpoint.
-- API errors report HTTP status and reason code, not response bodies.
-- No code path sends, deletes, modifies or marks mail as read.
+---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `python` opens the Microsoft Store | Use `py` or install Python from python.org with "Add to PATH" |
+| `python` opens the Microsoft Store | Use `py -3` or install Python from python.org with "Add to PATH" |
 | `Activate.ps1 cannot be loaded` | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` |
-| `OAuth client file not found` | Download the Desktop app client JSON as `credentials.json` |
+| `OAuth client file not found` | Save the Desktop-app client JSON as `credentials.json` |
 | `No OAuth token stored` | Run `python main.py gmail auth <alias>` |
-| Token expired/revoked after 7 days | Testing-mode tokens expire; re-run `gmail auth <alias>` |
+| Token rejected after ~7 days | Testing-mode expiry; reauthorize the alias |
 | `access blocked` / `app not verified` | Add your address under OAuth consent screen → Test users |
-| Wrong Google account signed in | Re-run with `--force` and pick the other account in the chooser |
-| `token grants broader access` | Delete `data/tokens/<alias>.json` and re-authenticate |
-| `Ollama is not reachable` | Start it with `ollama serve` (or launch the Ollama app) |
-| `Model 'llama3.2' is not installed` | `ollama pull llama3.2` |
-| `Ollama did not finish within ...s` | The first call may load the model; set `OLLAMA_TIMEOUT_SECONDS=300` (or higher) in `.env` |
-| `Ollama returned an invalid classification twice` | The model output stayed malformed; re-run and check `ollama --version` |
-
-## Windows verification (Phase 4)
-
-Open PowerShell in the project folder and run:
-
-```powershell
-py -3 -m unittest discover -s tests -v
-py -3 main.py doctor
-Get-ChildItem data\emails.db*
-```
-
-Expected: all tests pass, `doctor` reports `Database schema ... schema version 2,
-WAL enabled`, and the database appears under `data\` alongside any `-wal`/`-shm`
-sidecars. Those files are gitignored; never commit them.
+| Wrong Google account signed in | Re-run with `--force` and choose the other account |
+| `token grants broader access` | Delete `data/tokens/<alias>.json` and re-authenticate with `gmail.readonly` |
+| `Ollama is not reachable` | Start Ollama (`ollama serve`) or check the systemd service |
+| `Model ... is not installed` | `ollama pull llama3.2:3b` and set `OLLAMA_MODEL` accordingly |
+| Slow first analysis | Increase `OLLAMA_TIMEOUT_SECONDS`; the first request loads the model |
+| No Telegram message arrives | Run `python main.py telegram test`, then check `notifications pending` |
+| Gmail button shows "Temporary issue" | Known limitation; use the subject/account in the alert text to find the email in Gmail |
